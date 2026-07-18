@@ -192,7 +192,7 @@ function leaderboard() {
   const out = new Map();
   for (const [k, e] of [...S.emotes.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 60)) out.set(k, [k, e.n, e.provider, e.url]);
   for (const u of top) for (const nm in u.em) if (!out.has(nm)) { const e = S.emotes.get(nm); if (e) out.set(nm, [nm, e.n, e.provider, e.url]); }
-  return { channel: S.channel, roomId: S.roomId, total: S.total, updatedAt: Date.now(), startedAt: S.startedAt, days: [...S.days.entries()], hours: S.hours, emotes: [...out.values()], users: top };
+  return { channel: S.channel, roomId: S.roomId, total: S.total, userCount: S.users.size, updatedAt: Date.now(), startedAt: S.startedAt, days: [...S.days.entries()], hours: S.hours, emotes: [...out.values()], users: top };
 }
 function send(res, obj, maxAge) {
   res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=" + maxAge });
@@ -204,10 +204,47 @@ http.createServer((req, res) => {
   if (url.pathname === "/leaderboard") return send(res, leaderboard(), 5);
   if (url.pathname === "/user") { const lg = (url.searchParams.get("login") || "").toLowerCase(); const u = S.users.get(lg); return send(res, u ? userOut(u) : { error: "not found", login: lg }, 15); }
   if (url.pathname === "/health") return send(res, { ok: true, channel: S.channel, total: S.total, users: S.users.size, roomId: S.roomId, uptimeSec: Math.round((Date.now() - S.startedAt) / 1000) }, 0);
+  if (url.pathname === "/reset") {
+    const key = url.searchParams.get("key") || "";
+    if (!process.env.RESET_KEY || key !== process.env.RESET_KEY) {
+      res.writeHead(403, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      return res.end(JSON.stringify({ ok: false, error: "forbidden — set a RESET_KEY variable, then open /reset?key=YOUR_KEY" }));
+    }
+    S.total = 0; S.users.clear(); S.emotes.clear(); S.days.clear();
+    S.hours = new Array(24).fill(0); S.startedAt = Date.now();
+    save();                                   // overwrite the save file so a restart stays empty
+    console.log("[reset] tally cleared via /reset at " + new Date().toISOString());
+    return send(res, { ok: true, reset: true, message: "Leaderboard cleared — counting fresh from now.", channel: S.channel }, 0);
+  }
   res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
   res.end(JSON.stringify({ ok: true, channel: S.channel, endpoints: ["/leaderboard", "/user?login=", "/health"] }));
 }).listen(PORT, () => console.log("[api] listening on :" + PORT));
 
+// ---------- one-time seed import --------------------------------------------
+// On a brand-new Volume (no data.json yet) this restores a /leaderboard export
+// saved as ./seed.json, then save() writes it to the Volume. Ignored afterward.
+function loadSeed() {
+  try {
+    const p = "./seed.json";
+    if (!fs.existsSync(p)) return false;
+    const d = JSON.parse(fs.readFileSync(p, "utf8"));
+    if (d.channel && String(d.channel).toLowerCase() !== CHANNEL) { console.log("[seed] channel differs (" + d.channel + "), skipping"); return false; }
+    S.roomId = d.roomId || S.roomId || null;
+    S.total = d.total || 0;
+    S.startedAt = d.startedAt || Date.now();
+    S.hours = (Array.isArray(d.hours) && d.hours.length === 24) ? d.hours : new Array(24).fill(0);
+    S.days = new Map(d.days || []);
+    for (const e of (d.emotes || [])) { if (Array.isArray(e)) { const [k, n, pv, url] = e; if (k) S.emotes.set(k, { n: n || 0, provider: pv || "", url: url || "" }); } }
+    for (const u of (d.users || [])) {
+      if (!u || !u.login) continue;
+      S.users.set(String(u.login).toLowerCase(), { login: u.login, display: u.display || u.login, n: u.n || 0, first: u.first || Date.now(), last: u.last || Date.now(), color: u.color || null, uid: u.uid || null, badgeTag: u.badgeTag || "", d: u.d || {}, h: (Array.isArray(u.h) && u.h.length === 24) ? u.h : new Array(24).fill(0), em: u.em || {} });
+    }
+    console.log("[seed] imported " + S.total + " messages, " + S.users.size + " users from seed.json");
+    return true;
+  } catch (e) { console.log("[seed] error", e.message); return false; }
+}
+
 // ---------- go ---------------------------------------------------------------
 load();
+if (S.total === 0 && S.users.size === 0) { if (loadSeed()) save(); }   // fresh Volume -> restore export once
 connect();
